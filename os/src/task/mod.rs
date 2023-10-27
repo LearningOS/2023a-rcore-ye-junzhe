@@ -14,9 +14,10 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
-use crate::config::MAX_APP_NUM;
+use crate::config::{MAX_APP_NUM, MAX_SYSCALL_NUM};
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_ms;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -36,15 +37,15 @@ pub struct TaskManager {
     /// total number of tasks
     num_app: usize,
     /// use inner value to get mutable access
-    inner: UPSafeCell<TaskManagerInner>,
+    pub inner: UPSafeCell<TaskManagerInner>,
 }
 
 /// Inner of Task Manager
 pub struct TaskManagerInner {
     /// task list
-    tasks: [TaskControlBlock; MAX_APP_NUM],
+    pub tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
-    current_task: usize,
+    pub current_task: usize,
 }
 
 lazy_static! {
@@ -54,6 +55,8 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            syscall_count: [0; MAX_SYSCALL_NUM],
+            start_time: 0,
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
@@ -72,6 +75,23 @@ lazy_static! {
 }
 
 impl TaskManager {
+    fn syscall_count_increment(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current_task = inner.current_task;
+        let current_task_controller = &mut inner.tasks[current_task];
+        match syscall_id {
+            64  => current_task_controller.syscall_count[0] += 1,
+            93  => current_task_controller.syscall_count[1] += 1,
+            124 => current_task_controller.syscall_count[2] += 1,
+            169 => current_task_controller.syscall_count[3] += 1,
+            410 => current_task_controller.syscall_count[4] += 1,
+            _ => {}
+        }
+
+        // NOTE: !!!! DONT FORGET !!!!
+        drop(inner);
+    }
+
     /// Run the first task in task list.
     ///
     /// Generally, the first task in task list is an idle task (we call it zero process later).
@@ -80,6 +100,10 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let task0 = &mut inner.tasks[0];
         task0.task_status = TaskStatus::Running;
+
+        // TODO: Timer start here
+        task0.start_time = get_time_ms();
+
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -156,6 +180,11 @@ fn mark_current_suspended() {
 /// Change the status of current `Running` task into `Exited`.
 fn mark_current_exited() {
     TASK_MANAGER.mark_current_exited();
+}
+
+/// Increment syscall times
+pub fn syscall_count_increment(syscall_id: usize) {
+    TASK_MANAGER.syscall_count_increment(syscall_id);
 }
 
 /// Suspend the current 'Running' task and run the next task in task list.

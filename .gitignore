@@ -17,3 +17,7 @@ pushall.sh
 *.bak
 
 user/*
+
+ci-user
+
+user
