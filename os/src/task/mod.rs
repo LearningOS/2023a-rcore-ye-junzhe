@@ -16,7 +16,10 @@ mod task;
 
 use crate::loader::{get_app_data, get_num_app};
 use crate::sync::UPSafeCell;
+use crate::mm::VirtPageNum;
 use crate::trap::TrapContext;
+use crate::syscall::TaskInfo;
+use crate::timer::get_time_us;
 use alloc::vec::Vec;
 use lazy_static::*;
 use switch::__switch;
@@ -37,15 +40,15 @@ pub struct TaskManager {
     /// total number of tasks
     num_app: usize,
     /// use inner value to get mutable access
-    inner: UPSafeCell<TaskManagerInner>,
+    pub inner: UPSafeCell<TaskManagerInner>,
 }
 
 /// The task manager inner in 'UPSafeCell'
-struct TaskManagerInner {
+pub struct TaskManagerInner {
     /// task list
-    tasks: Vec<TaskControlBlock>,
+    pub tasks: Vec<TaskControlBlock>,
     /// id of current `Running` task
-    current_task: usize,
+    pub current_task: usize,
 }
 
 lazy_static! {
@@ -78,6 +81,10 @@ impl TaskManager {
     fn run_first_task(&self) -> ! {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
+
+        // NOTE: Get the start_time of the first run task
+        next_task.start_time = get_time_us() / 1000;
+
         next_task.task_status = TaskStatus::Running;
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
@@ -153,7 +160,70 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    fn syscall_count_increment(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current_task = inner.current_task;
+        let current_task_controller = &mut inner.tasks[current_task];
+        match syscall_id {
+            64  => current_task_controller.syscall_count[0] += 1,
+            93  => current_task_controller.syscall_count[1] += 1,
+            124 => current_task_controller.syscall_count[2] += 1,
+            169 => current_task_controller.syscall_count[3] += 1,
+            410 => current_task_controller.syscall_count[4] += 1,
+            214 => current_task_controller.syscall_count[5] += 1,
+            215 => current_task_controller.syscall_count[6] += 1, 
+            222 => current_task_controller.syscall_count[6] += 1,
+            _ => {}
+        }
+
+        // NOTE: !!!! DONT FORGET !!!!
+        drop(inner);
+    }
+
+    /// mmap
+    pub fn mmap(&self, vpn_start: VirtPageNum, vpn_end: VirtPageNum, port: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current_task = inner.current_task;
+        let current_task_controller = &mut inner.tasks[current_task];
+
+        current_task_controller.memory_set.mmap(vpn_start, vpn_end, port)
+    }
+
+    /// munmap
+    pub fn munmap(&self, vpn_start: VirtPageNum, vpn_end: VirtPageNum) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current_task = inner.current_task;
+        let current_task_controller = &mut inner.tasks[current_task];
+
+        current_task_controller.memory_set.munmap(vpn_start, vpn_end)
+    }
 }
+
+impl TaskInfo{
+    /// NOTE: TaskInfo revealing
+    pub fn reveal(task_info: *mut TaskInfo) {
+        let mut inner = TASK_MANAGER.inner.exclusive_access();
+        let current_task = inner.current_task;
+        let current_task_controller = &mut inner.tasks[current_task];
+
+        let current_time = get_time_us() / 1000;
+
+        unsafe {
+            (*task_info).time = current_time - current_task_controller.start_time;
+
+            (*task_info).syscall_times[64]  = current_task_controller.syscall_count[0];
+            (*task_info).syscall_times[93]  = current_task_controller.syscall_count[1];
+            (*task_info).syscall_times[124] = current_task_controller.syscall_count[2];
+            (*task_info).syscall_times[169] = current_task_controller.syscall_count[3];
+            (*task_info).syscall_times[410] = current_task_controller.syscall_count[4];
+
+            (*task_info).status = TaskStatus::Running;
+        }
+
+        drop(inner);
+    }
+} 
 
 /// Run the first task in task list.
 pub fn run_first_task() {
@@ -201,4 +271,19 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Increment syscall times
+pub fn syscall_count_increment(syscall_id: usize) {
+    TASK_MANAGER.syscall_count_increment(syscall_id);
+}
+
+/// Allocate Mem
+pub fn allocate_mem(vpn_start: VirtPageNum, vpn_end: VirtPageNum, port: usize) -> isize {
+    TASK_MANAGER.mmap(vpn_start, vpn_end, port)
+}
+
+/// Deallocate Mem
+pub fn deallocate_mem(vpn_start: VirtPageNum, vpn_end: VirtPageNum) -> isize {
+    TASK_MANAGER.munmap(vpn_start, vpn_end)
 }
