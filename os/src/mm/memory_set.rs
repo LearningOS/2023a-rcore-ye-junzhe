@@ -300,6 +300,72 @@ impl MemorySet {
             false
         }
     }
+
+    /// mmap
+    pub fn mmap(&mut self, vpn_start: VirtPageNum, vpn_end: VirtPageNum, port: usize) -> isize {
+
+        let mut flags = PTEFlags::empty();
+
+        // Calculate PTEFlags
+        if port & 1 == 1 {
+            flags |= PTEFlags::R;
+        }
+        if (port >> 1) & 1 == 1 {
+            flags |= PTEFlags::W;
+        }
+        if (port >> 2) & 1 == 1 {
+            flags |= PTEFlags::X;
+        }
+        flags |= PTEFlags::U | PTEFlags::V;
+
+        // MAPPING VPN AND PPN
+        let mut vpn_start = vpn_start;
+        for _ in vpn_start.0..vpn_end.0 {
+            match self.page_table.translate(vpn_start) {
+                Some(pte) => {
+                    info!("[LOGGING INFO] VPN: {:?}, PTE: {:?}", vpn_start, pte.flags());
+                    if pte.is_valid()
+                    {
+                        info!("[LOGGING INFO] VPN ALREADY MAPPED");
+                        return -1;
+                    }
+                }
+                _ => info!("[DEBUGGING] NOT MAPPED"),
+            }
+            match frame_alloc() {
+                Some(frame) => {
+                    info!("[LOGGING INFO] SUCCEED: MAPPING VPN AND PPN");
+                    let ppn = frame.ppn;
+                    self.page_table.map(vpn_start, ppn, flags);
+                }
+                _ => {
+                    info!("[LOGGING INFO] FAILED: FRAME ALLOC FAILED");
+                    return -1;
+
+                }
+            }
+            vpn_start.step();
+            info!("[LOGGING INFO] NEXT VPN");
+        }
+
+        0
+    }
+
+    /// mmunmap
+    pub fn munmap(&mut self, vpn_start: VirtPageNum, vpn_end: VirtPageNum) -> isize {
+
+        let mut vpn_start = vpn_start;
+        for _ in vpn_start.0..vpn_end.0 {
+            match self.page_table.translate(vpn_start) {
+                Some(pte) => if !pte.is_valid() { return -1; },
+                _ => return -1,
+            }
+
+            self.page_table.unmap(vpn_start);
+            vpn_start.step();
+        }
+        0
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
